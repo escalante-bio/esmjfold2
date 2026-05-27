@@ -1,0 +1,59 @@
+# Python build / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# Editable installs / wheels
+src/*.egg-info/
+src/**/*.egg-info/
+
+# uv / virtualenv
+.venv/
+venv/
+env/
+ENV/
+.python-version
+uv.lock
+
+# Test / coverage
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.tox/
+.nox/
+.hypothesis/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# JAX / model artifacts
+*.eqx
+*.skeleton.pkl
+
+# Large prediction outputs / structural artifacts we don't ship in the repo
+structures/
+*.cif
+*.pdb
+*.npz
+*.a3m
+
+# Local secrets
+.env
+.env.local

@@ -1,0 +1,98 @@
+esmjfold2
+Copyright 2026 esmjfold2 contributors
+
+This product is a JAX/Equinox translation of the ESMFold2 protein structure
+prediction model. It contains code and architectural designs derived from the
+following upstream projects:
+
+==================================================================
+Portions ported from the Biohub fork of HuggingFace Transformers
+==================================================================
+
+Source: https://github.com/Biohub/transformers
+        src/transformers/models/esmfold2/{configuration,modeling}_esmfold2*.py
+        src/transformers/models/esmc/{configuration,modeling}_esmc.py
+License: Apache License, Version 2.0
+Copyright 2026 Biohub. All rights reserved.
+
+The PyTorch architecture (modules, parameter names, forward semantics) of
+ESMFold2 and ESMC is the work of Biohub / Chan Zuckerberg Biohub. The
+following esmjfold2 source files are derivative translations of their
+PyTorch reference into JAX/Equinox:
+
+  src/esmjfold2/model.py             ← ESMFold2Model
+  src/esmjfold2/esmc.py              ← ESMCModel + transformer blocks
+  src/esmjfold2/confidence.py        ← ConfidenceHead
+  src/esmjfold2/diffusion.py         ← DiffusionStructureHead + sampler
+  src/esmjfold2/attention.py         ← AttentionPairBias + DiffusionTransformer
+  src/esmjfold2/triangle.py          ← TriangleMultiplicativeUpdate, OPM, MSAPairWeightedAveraging
+  src/esmjfold2/trunk.py             ← FoldingTrunk, PairUpdateBlock, Transition
+  src/esmjfold2/inputs.py            ← InputsEmbedder, RelPos, RowAttentionPooling
+  src/esmjfold2/swa.py               ← SWA atom attention + 3D RoPE
+  src/esmjfold2/atom_encoder.py      ← ESMFold2AtomEncoder/Decoder
+  src/esmjfold2/msa.py               ← MSAEncoder
+  src/esmjfold2/adaln.py             ← AdaptiveLayerNorm + transition blocks
+  src/esmjfold2/swiglu.py            ← SwiGLU variants
+  src/esmjfold2/language_model.py    ← LanguageModelShim, SingleToPair
+  src/esmjfold2/primitives.py        ← Linear / LayerNorm / etc. matching state-dict layout
+
+Changes vs the upstream reference:
+  * Functional / pytree style replacing nn.Module mutable state
+  * Refinement loop hoisted into jax.lax.fori_loop (was a Python for-loop)
+  * Transformer / atom stacks hoisted into jax.lax.scan (was nn.ModuleList)
+  * Karras schedule truncation moved to numpy at trace time (was torch boolean
+    indexing producing dynamic shapes)
+  * LM-feature wrapper (compute_lm_hidden_states) reimplemented in numpy to
+    avoid the dynamic-shape torch.unique / BOS/EOS insertion that isn't
+    jax.jit-compatible
+  * Triton / flash-attn / cuequivariance / transformer-engine fused kernel
+    paths replaced with reference JAX implementations
+  * Several upstream indexing bugs identified during parity testing have
+    been fixed in this port (rel_pos i/j flip, SingleToPair diff term i/j
+    flip, Karras schedule cap clipping in place rather than filter+prepend)
+
+==================================================================
+Portions ported from biohub/esm
+==================================================================
+
+Source: https://github.com/Biohub/esm
+        esm/models/esmfold2/{output,prepare_input,processor,constants}.py
+        esm/models/esmfold2/protein_utils.py (via transformers fork)
+License: MIT License
+Copyright 2026 Chan Zuckerberg Biohub, Inc.
+
+The structure-output path is a near-direct numpy port:
+
+  src/esmjfold2/structure_output.py  ← build_molecular_complex_from_features
+
+This module also calls into MolecularComplex.to_mmcif() / .to_pdb() at
+runtime (no source ported, just a runtime dependency).
+
+==================================================================
+Upstream license texts
+==================================================================
+
+The full text of the Apache License 2.0 is included in this distribution
+as LICENSE. The MIT License text covering the Chan Zuckerberg Biohub /
+biohub-esm code is reproduced below.
+
+----------------------------------------------------------------------
+MIT License — Copyright 2026 Chan Zuckerberg Biohub, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.

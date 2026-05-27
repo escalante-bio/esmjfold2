@@ -1,0 +1,38 @@
+[project]
+name = "esmjfold2"
+version = "0.1.0"
+description = "JAX/Equinox translation of ESMFold2"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = [
+    "einops>=0.8.0",
+    "equinox>=0.12.1",
+    "jax>=0.10.0",
+    "jaxtyping>=0.3.2",
+    "numpy>=1.26.3",
+]
+
+[project.optional-dependencies]
+convert = [
+    "torch",
+    "transformer-engine[pytorch]; sys_platform == 'linux'",
+    "accelerate",
+    "safetensors",
+    # transformers fork that ships ESMFold2 architecture
+    "transformers @ git+https://github.com/Biohub/transformers.git",
+    "esm @ git+https://github.com/Biohub/esm.git",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/esmjfold2"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
