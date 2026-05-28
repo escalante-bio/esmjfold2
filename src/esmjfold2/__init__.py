@@ -6,7 +6,7 @@ not require torch.
 """
 
 from .esmc import ESMC
-from .experimental import ESMFold2Experimental, PredictionExperimental
+from .experimental import ESMFold2Experimental
 from .features import Features
 from .lm_features import compute_lm_hidden_states
 from .model import ESMFold2
@@ -43,7 +43,6 @@ __all__ = [
     "ESMFold2Experimental",
     "Features",
     "Prediction",
-    "PredictionExperimental",
     "compute_lm_hidden_states",
     "from_torch",
     "load_model",

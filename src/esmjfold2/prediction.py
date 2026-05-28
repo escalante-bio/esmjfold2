@@ -51,8 +51,9 @@ class Prediction(eqx.Module):
     complex_plddt: Float[Array, "B"]
 
     #: Per-atom 2-way logit (unresolved, resolved). Probability of the atom
-    #: being well-defined under the model.
-    resolved_logits: Float[Array, "B A 2"]
+    #: being well-defined under the model. ``None`` on the experimental
+    #: checkpoints (their slim confidence head does not emit it).
+    resolved_logits: Float[Array, "B A 2"] | None
 
     # ------------------------------------------------------------------
     # Pairwise confidence (PAE / PDE / pTM)
@@ -64,11 +65,13 @@ class Prediction(eqx.Module):
     #: Expected PAE per token pair, in Ångströms.
     pae: Float[Array, "B L L"]
 
-    #: Predicted Distance Error logits (64 bins over 0–32 Å).
-    pde_logits: Float[Array, "B L L 64"]
+    #: Predicted Distance Error logits (64 bins over 0–32 Å). ``None`` on
+    #: the experimental checkpoints (no PDE head).
+    pde_logits: Float[Array, "B L L 64"] | None
 
-    #: Expected PDE per token pair, in Ångströms.
-    pde: Float[Array, "B L L"]
+    #: Expected PDE per token pair, in Ångströms. ``None`` on the
+    #: experimental checkpoints.
+    pde: Float[Array, "B L L"] | None
 
     #: Predicted TM-score, max over the per-row aggregate (AF2 / AF3 convention).
     ptm: Float[Array, "B"]

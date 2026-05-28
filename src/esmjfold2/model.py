@@ -158,9 +158,18 @@ class ESMFold2(eqx.Module):
         atom_to_token = features.atom_to_token * atm_mask.astype(jnp.int32)
 
         # Profile from MSA (or fall back to res_type for single sequence).
+        # `msa` is accepted as either [B, M, L] integers or [B, M, L, NUM_RES_TYPES]
+        # already-one-hot floats (mirroring the soft-input convention for
+        # `res_type`). The latter is what mosaic-style design uses to backprop
+        # through the binder PSSM via the MSA query row.
         msa = features.msa
         if msa is not None:
-            msa_oh_profile = jax.nn.one_hot(msa.astype(jnp.int32), NUM_RES_TYPES).astype(jnp.float32)
+            if msa.ndim == 3:
+                msa_oh_profile = jax.nn.one_hot(
+                    msa.astype(jnp.int32), NUM_RES_TYPES
+                ).astype(jnp.float32)
+            else:
+                msa_oh_profile = msa.astype(jnp.float32)
             msa_attn = features.msa_attention_mask
             if msa_attn is not None:
                 mf = msa_attn.astype(jnp.float32)[..., None]
@@ -210,12 +219,17 @@ class ESMFold2(eqx.Module):
         pair_mask = mask_f[:, :, None] * mask_f[:, None, :]
 
         # MSA encoder inputs (pre-transposed to [B, L, M, *]).
+        # Same 3D / 4D dispatch as the profile path above.
         msa_kwargs = None
         if self.msa_encoder is not None and msa is not None:
-            B_msa, M, _L = msa.shape
-            msa_oh = jax.nn.one_hot(
-                jnp.transpose(msa.astype(jnp.int32), (0, 2, 1)), NUM_RES_TYPES
-            ).astype(jnp.float32)
+            if msa.ndim == 3:
+                B_msa, M, _L = msa.shape
+                msa_oh = jax.nn.one_hot(
+                    jnp.transpose(msa.astype(jnp.int32), (0, 2, 1)), NUM_RES_TYPES
+                ).astype(jnp.float32)
+            else:
+                B_msa, M, _L, _ = msa.shape
+                msa_oh = jnp.transpose(msa.astype(jnp.float32), (0, 2, 1, 3))
             msa_attn = features.msa_attention_mask
             if msa_attn is not None:
                 msa_attn_t = jnp.transpose(msa_attn.astype(jnp.float32), (0, 2, 1))
@@ -375,6 +389,11 @@ class ESMFold2(eqx.Module):
             z_new = self.folding_trunk(z_new, pair_attention_mask=ctx.pair_mask)
             return (z_new, k)
 
+        # Wrap the body in jax.checkpoint so reverse-mode autodiff recomputes
+        # per-iteration activations instead of materialising them — backward
+        # memory drops from O(num_loops * per-step) to ~O(per-step) at the
+        # cost of one extra forward pass per iteration.
+        body = jax.checkpoint(body)
         z, _ = jax.lax.fori_loop(0, total_steps, body, (z, key))
 
         z = self.parcae_readout(z)
@@ -450,7 +469,7 @@ class ESMFold2(eqx.Module):
         noise_scale: float | None = None,
         step_scale: float | None = None,
         msa_max_depth: int | None = 1024,
-    ):
+    ) -> Prediction:
         """Run a full forward pass.
 
         ``features`` is a :class:`Features` instance. Build one from the dict

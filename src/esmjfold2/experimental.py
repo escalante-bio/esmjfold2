@@ -27,7 +27,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int
+from jaxtyping import Array, Float, Int
 
 from .atom_encoder import (
     CHAR_VOCAB_SIZE,
@@ -51,6 +51,8 @@ from .inputs import (
     RowAttentionPooling,
 )
 from .language_model import LanguageModelShim
+from .model import _Context  # shared embedding context (same shape as release)
+from .prediction import Prediction
 from .primitives import Embedding, LayerNorm, Linear, Sequential
 from .triangle import (
     MSAPairWeightedAveraging,
@@ -330,34 +332,6 @@ class ConfidenceHeadExperimental(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
-# Typed output for the experimental model
-# ---------------------------------------------------------------------------
-
-
-class PredictionExperimental(eqx.Module):
-    """Same key fields as :class:`esmjfold2.Prediction` minus PDE / resolved
-    (which the experimental confidence head does not produce).
-    """
-
-    sample_atom_coords: Float[Array, "B A 3"]
-    distogram_logits: Float[Array, "B L L Dbins"]
-
-    plddt: Float[Array, "B L"]
-    plddt_per_atom: Float[Array, "B A"]
-    plddt_logits: Float[Array, "B A 50"]
-    complex_plddt: Float[Array, "B"]
-
-    pae_logits: Float[Array, "B L L 64"]
-    pae: Float[Array, "B L L"]
-
-    ptm: Float[Array, "B"]
-    iptm: Float[Array, "B"]
-
-    residue_index: Float[Array, "B L"]
-    entity_id: Float[Array, "B L"]
-
-
-# ---------------------------------------------------------------------------
 # Top-level experimental model
 # ---------------------------------------------------------------------------
 
@@ -383,10 +357,15 @@ class ESMFold2Experimental(eqx.Module):
     lm_dropout: float = eqx.field(static=True)
 
     # ------------------------------------------------------------------
+    # Phase 1: featurization
+    # ------------------------------------------------------------------
 
-    def _prepare_embeddings(self, features: Features):
-        """Featurize. Returns ``(x_inputs, z_init, rel_pos_enc,
-        token_bonds_enc, pair_mask, msa_kwargs, n_tokens)``.
+    def _prepare_embeddings(self, features: Features) -> _Context:
+        """One-hot / mask / project all input features into a ``_Context``.
+
+        Identical to ``ESMFold2._prepare_embeddings`` except the MSA-kwargs
+        branch only handles the 3D-int input shape (the experimental code
+        path doesn't take pre-one-hot MSA tensors).
         """
         res_type = features.res_type
         tok_mask = features.token_attention_mask
@@ -492,11 +471,186 @@ class ESMFold2Experimental(eqx.Module):
                 msa_attention_mask=msa_attn_t,
             )
 
-        return (
-            x_inputs, z_init, rel_pos_enc, token_bonds_enc, pair_mask,
-            atom_to_token, ref_element_oh, ref_atom_name_chars_oh, msa_kwargs, L,
+        return _Context(
+            x_inputs=x_inputs,
+            z_init=z_init,
+            relative_position_encoding=rel_pos_enc,
+            token_bonds_encoding=token_bonds_enc,
+            pair_mask=pair_mask,
+            tok_mask=tok_mask,
+            ref_pos=features.ref_pos,
+            ref_charge=features.ref_charge,
+            atm_mask=atm_mask,
+            ref_element_oh=ref_element_oh,
+            ref_atom_name_chars_oh=ref_atom_name_chars_oh,
+            ref_space_uid=features.ref_space_uid,
+            atom_to_token=atom_to_token,
+            distogram_atom_idx=features.distogram_atom_idx,
+            asym_id=features.asym_id,
+            mol_type=features.mol_type,
+            residue_index=features.residue_index,
+            entity_id=features.entity_id,
+            msa_kwargs=msa_kwargs,
+            n_tokens=L,
+            n_atoms=int(features.atom_to_token.shape[1]),
         )
 
+    # ------------------------------------------------------------------
+    # Phase 2: trunk refinement loop
+    # ------------------------------------------------------------------
+
+    def _run_trunk(
+        self,
+        ctx: _Context,
+        lm_z,
+        key,
+        *,
+        num_loops: int,
+        msa_max_depth: int | None = None,
+    ):
+        """Refinement loop: ``z_{i+1} = trunk(z_init + proj(z_i) [+ msa(z)])``.
+
+        The LM contribution is added once to ``z_init`` before the loop
+        (no per-loop refinement, no per-loop dropout — both are static in
+        this architecture). Optional dropout is applied once to ``lm_z``.
+
+        ``msa_max_depth`` controls per-loop MSA subsampling. The torch
+        experimental reference doesn't subsample, so the default is
+        ``None`` (parity with torch). Set a finite cap to opt into the
+        paper's per-loop subsampling recipe — at every step, sample
+        ``msa_max_depth`` rows from the full MSA (always keeping row 0,
+        the query). Same semantics as ``ESMFold2._run_trunk``.
+
+        Same weights every iteration → ``jax.lax.fori_loop``. Body wrapped
+        in ``jax.checkpoint`` so reverse-mode autodiff recomputes per-step
+        activations rather than materialising them (mirrors the release
+        model's memory profile).
+        """
+        total_steps = max(1, num_loops + 1)
+
+        if lm_z is not None and self.lm_dropout > 0.0:
+            key, kdrop = jax.random.split(key)
+            keep_prob = 1.0 - self.lm_dropout
+            mask = jax.random.bernoulli(kdrop, p=keep_prob, shape=lm_z.shape)
+            lm_z = jnp.where(mask, lm_z / keep_prob, 0.0)
+
+        z_init = ctx.z_init + lm_z if lm_z is not None else ctx.z_init
+        z0 = jnp.zeros_like(z_init)
+
+        _do_msa_subsample = (
+            self.msa_encoder is not None
+            and ctx.msa_kwargs is not None
+            and msa_max_depth is not None
+            and msa_max_depth < ctx.msa_kwargs["msa_oh"].shape[2]
+        )
+        if _do_msa_subsample:
+            _msa_max_depth_static = int(msa_max_depth)
+            _full_msa_depth = int(ctx.msa_kwargs["msa_oh"].shape[2])
+        else:
+            _msa_max_depth_static = None
+            _full_msa_depth = None
+
+        def body(step_i, carry):
+            z, k = carry
+            z = z_init + self.pair_loop_proj(z)
+            if self.msa_encoder is not None and ctx.msa_kwargs is not None:
+                if _do_msa_subsample:
+                    kmsa = jax.random.fold_in(k, step_i)
+                    pick = jax.random.choice(
+                        kmsa,
+                        _full_msa_depth - 1,
+                        shape=(_msa_max_depth_static - 1,),
+                        replace=False,
+                    ) + 1
+                    idx = jnp.concatenate([jnp.zeros((1,), dtype=pick.dtype), pick])
+                    msa_kwargs_step = {
+                        "x_inputs": ctx.msa_kwargs["x_inputs"],
+                        "msa_oh": jnp.take(ctx.msa_kwargs["msa_oh"], idx, axis=2),
+                        "has_deletion": jnp.take(ctx.msa_kwargs["has_deletion"], idx, axis=2),
+                        "deletion_value": jnp.take(ctx.msa_kwargs["deletion_value"], idx, axis=2),
+                        "msa_attention_mask": jnp.take(ctx.msa_kwargs["msa_attention_mask"], idx, axis=2),
+                    }
+                else:
+                    msa_kwargs_step = ctx.msa_kwargs
+                z = z + self.msa_encoder(x_pair=z, **msa_kwargs_step)
+            z = self.folding_trunk(z, pair_attention_mask=ctx.pair_mask)
+            return (z, k)
+
+        body = jax.checkpoint(body)
+        z, _ = jax.lax.fori_loop(0, total_steps, body, (z0, key))
+        return z
+
+    # ------------------------------------------------------------------
+    # Phase 3: diffusion structure sampler
+    # ------------------------------------------------------------------
+
+    def _sample_structure(
+        self,
+        ctx: _Context,
+        z,
+        key,
+        *,
+        num_sampling_steps: int,
+        noise_scale: float | None,
+        step_scale: float | None,
+    ):
+        """Run the Karras-style diffusion sampler in the structure head."""
+        return self.structure_head.sample(
+            key,
+            z_trunk=z, s_inputs=ctx.x_inputs,
+            relative_position_encoding=ctx.relative_position_encoding,
+            ref_pos=ctx.ref_pos, ref_charge=ctx.ref_charge,
+            ref_mask=ctx.atm_mask,
+            ref_element_oh=ctx.ref_element_oh,
+            ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh,
+            ref_space_uid=ctx.ref_space_uid,
+            atom_to_token=ctx.atom_to_token,
+            token_attention_mask=ctx.tok_mask,
+            n_atoms=ctx.n_atoms,
+            n_tokens=ctx.n_tokens,
+            num_sampling_steps=num_sampling_steps,
+            noise_scale=noise_scale,
+            step_scale=step_scale,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 4: distogram + confidence heads
+    # ------------------------------------------------------------------
+
+    def _compute_distogram(self, z):
+        """Symmetrize the pair representation and project to bin logits."""
+        return self.distogram_head(z + jnp.swapaxes(z, -2, -3))
+
+    def _compute_confidence(self, ctx: _Context, z, sample_atom_coords):
+        """Run the confidence head. Returns zero-tensor placeholders when
+        the head is absent (some experimental checkpoints ship without
+        a trained confidence head)."""
+        if self.confidence_head is not None:
+            return self.confidence_head(
+                s_inputs=ctx.x_inputs, z=z, x_pred=sample_atom_coords,
+                distogram_atom_idx=ctx.distogram_atom_idx,
+                token_attention_mask=ctx.tok_mask,
+                atom_to_token=ctx.atom_to_token,
+                atom_attention_mask=ctx.atm_mask,
+                asym_id=ctx.asym_id,
+                mol_type=ctx.mol_type,
+                relative_position_encoding=ctx.relative_position_encoding,
+                token_bonds_encoding=ctx.token_bonds_encoding,
+            )
+        B = ctx.x_inputs.shape[0]
+        return {
+            "plddt_logits":   jnp.zeros((B, ctx.n_atoms, 50), dtype=jnp.float32),
+            "plddt":          jnp.zeros((B, ctx.n_tokens), dtype=jnp.float32),
+            "plddt_per_atom": jnp.zeros((B, ctx.n_atoms), dtype=jnp.float32),
+            "complex_plddt":  jnp.zeros((B,), dtype=jnp.float32),
+            "pae_logits":     jnp.zeros((B, ctx.n_tokens, ctx.n_tokens, 64), dtype=jnp.float32),
+            "pae":            jnp.zeros((B, ctx.n_tokens, ctx.n_tokens), dtype=jnp.float32),
+            "ptm":            jnp.zeros((B,), dtype=jnp.float32),
+            "iptm":           jnp.zeros((B,), dtype=jnp.float32),
+        }
+
+    # ------------------------------------------------------------------
+    # Top-level forward — orchestration only.
     # ------------------------------------------------------------------
 
     def __call__(
@@ -509,107 +663,57 @@ class ESMFold2Experimental(eqx.Module):
         num_sampling_steps: int = 14,
         noise_scale: float | None = None,
         step_scale: float | None = None,
-    ) -> PredictionExperimental:
+        msa_max_depth: int | None = None,
+    ) -> Prediction:
         """Run a full forward pass.
 
-        Matches ``ESMFold2ExperimentalModel.forward`` in the Biohub
-        transformers fork. No per-loop LM dropout, no per-loop MSA
-        subsampling — both are static in this architecture.
+        Same signature as :meth:`ESMFold2.__call__` so a caller can swap
+        between the release and experimental models without touching the
+        call site. The returned :class:`Prediction` has ``resolved_logits``,
+        ``pde_logits``, ``pde`` set to ``None`` (the experimental
+        confidence head does not produce them).
+
+        ``msa_max_depth`` defaults to ``None`` here, matching the torch
+        experimental reference (no per-loop MSA subsampling). Pass an
+        integer to opt into the paper's recipe.
         """
         n_loops = self.num_loops if num_loops is None else num_loops
-        total_steps = max(1, n_loops + 1)
 
-        (x_inputs, z_init, rel_pos_enc, token_bonds_enc, pair_mask,
-         atom_to_token, ref_element_oh, ref_atom_name_chars_oh,
-         msa_kwargs, L) = self._prepare_embeddings(features)
+        ctx = self._prepare_embeddings(features)
+        lm_z = (
+            self.language_model(lm_hidden_states)
+            if lm_hidden_states is not None
+            else None
+        )
 
-        # LM contribution: added ONCE outside the loop. Optional dropout
-        # before adding.
-        if lm_hidden_states is not None:
-            lm_z = self.language_model(lm_hidden_states)
-            if self.lm_dropout > 0.0:
-                key, kdrop = jax.random.split(key)
-                keep_prob = 1.0 - self.lm_dropout
-                mask = jax.random.bernoulli(kdrop, p=keep_prob, shape=lm_z.shape)
-                lm_z = jnp.where(mask, lm_z / keep_prob, 0.0)
-            z_init = z_init + lm_z
-
-        # Refinement loop — same weights each step → fori_loop.
-        z0 = jnp.zeros_like(z_init)
-
-        def body(step_i, z):
-            z = z_init + self.pair_loop_proj(z)
-            if self.msa_encoder is not None and msa_kwargs is not None:
-                z = z + self.msa_encoder(x_pair=z, **msa_kwargs)
-            z = self.folding_trunk(z, pair_attention_mask=pair_mask)
-            return z
-
-        z = jax.lax.fori_loop(0, total_steps, body, z0)
-
-        # Distogram
-        distogram_logits = self.distogram_head(z + jnp.swapaxes(z, -2, -3))
-
-        # Diffusion sampler
-        key, ksample = jax.random.split(key)
-        sample_atom_coords = self.structure_head.sample(
-            ksample,
-            z_trunk=z, s_inputs=x_inputs,
-            relative_position_encoding=rel_pos_enc,
-            ref_pos=features.ref_pos, ref_charge=features.ref_charge,
-            ref_mask=features.atom_attention_mask,
-            ref_element_oh=ref_element_oh,
-            ref_atom_name_chars_oh=ref_atom_name_chars_oh,
-            ref_space_uid=features.ref_space_uid,
-            atom_to_token=atom_to_token,
-            token_attention_mask=features.token_attention_mask,
-            n_atoms=int(features.atom_to_token.shape[1]),
-            n_tokens=L,
+        key, ktrunk, ksample = jax.random.split(key, 3)
+        z = self._run_trunk(
+            ctx, lm_z, ktrunk, num_loops=n_loops, msa_max_depth=msa_max_depth
+        )
+        sample_atom_coords = self._sample_structure(
+            ctx, z, ksample,
             num_sampling_steps=num_sampling_steps,
             noise_scale=noise_scale,
             step_scale=step_scale,
         )
 
-        # Confidence (optional)
-        if self.confidence_head is not None:
-            confidence = self.confidence_head(
-                s_inputs=x_inputs, z=z, x_pred=sample_atom_coords,
-                distogram_atom_idx=features.distogram_atom_idx,
-                token_attention_mask=features.token_attention_mask,
-                atom_to_token=atom_to_token,
-                atom_attention_mask=features.atom_attention_mask,
-                asym_id=features.asym_id,
-                mol_type=features.mol_type,
-                relative_position_encoding=rel_pos_enc,
-                token_bonds_encoding=token_bonds_enc,
-            )
-        else:
-            B = x_inputs.shape[0]
-            A = int(features.atom_to_token.shape[1])
-            n_pae = self.distogram_head.weight.shape[0]  # placeholder shape
-            confidence = {
-                "plddt_logits": jnp.zeros((B, A, 50), dtype=jnp.float32),
-                "plddt": jnp.zeros((B, L), dtype=jnp.float32),
-                "plddt_per_atom": jnp.zeros((B, A), dtype=jnp.float32),
-                "complex_plddt": jnp.zeros((B,), dtype=jnp.float32),
-                "pae_logits": jnp.zeros((B, L, L, 64), dtype=jnp.float32),
-                "pae": jnp.zeros((B, L, L), dtype=jnp.float32),
-                "ptm": jnp.zeros((B,), dtype=jnp.float32),
-                "iptm": jnp.zeros((B,), dtype=jnp.float32),
-            }
-
-        return PredictionExperimental(
+        confidence = self._compute_confidence(ctx, z, sample_atom_coords)
+        return Prediction(
             sample_atom_coords=sample_atom_coords,
-            distogram_logits=distogram_logits,
+            distogram_logits=self._compute_distogram(z),
             plddt=confidence["plddt"],
             plddt_per_atom=confidence["plddt_per_atom"],
             plddt_logits=confidence["plddt_logits"],
             complex_plddt=confidence["complex_plddt"],
+            resolved_logits=None,
             pae_logits=confidence["pae_logits"],
             pae=confidence["pae"],
+            pde_logits=None,
+            pde=None,
             ptm=confidence["ptm"],
             iptm=confidence["iptm"],
-            residue_index=features.residue_index,
-            entity_id=features.entity_id,
+            residue_index=ctx.residue_index,
+            entity_id=ctx.entity_id,
         )
 
     @classmethod
