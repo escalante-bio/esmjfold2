@@ -9,6 +9,7 @@ from __future__ import annotations
 from .backend import from_torch, register_base_types
 from . import adaln, attention, atom_encoder, confidence, diffusion, esmc, inputs
 from . import language_model, model, msa, primitives, swa, swiglu, triangle, trunk
+from . import experimental
 
 
 def _register_all() -> None:
@@ -27,6 +28,7 @@ def _register_all() -> None:
     confidence.register()
     esmc.register()
     model.register()
+    experimental.register()
 
 
 _register_all()

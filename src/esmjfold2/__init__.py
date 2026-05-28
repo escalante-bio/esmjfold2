@@ -6,6 +6,7 @@ not require torch.
 """
 
 from .esmc import ESMC
+from .experimental import ESMFold2Experimental, PredictionExperimental
 from .features import Features
 from .lm_features import compute_lm_hidden_states
 from .model import ESMFold2
@@ -39,8 +40,10 @@ def prepare_protein_features(sequence: str):
 __all__ = [
     "ESMC",
     "ESMFold2",
+    "ESMFold2Experimental",
     "Features",
     "Prediction",
+    "PredictionExperimental",
     "compute_lm_hidden_states",
     "from_torch",
     "load_model",
