@@ -318,5 +318,10 @@ class DiffusionStructureHead(AbstractFromTorch):
             x = x_noisy_aligned + eta * (sigma_t - t_hat) * denoised_over_sigma
             return (x, key), None
 
+        # Checkpoint each Karras step so backward recomputes diffusion-module
+        # activations instead of holding them across all `num_sampling_steps`
+        # scan iterations. ~1x extra forward compute, ~num_sampling_steps x
+        # less activation memory.
+        step = jax.checkpoint(step)
         (x, _), _ = jax.lax.scan(step, (x, key), (sigma_tms, sigma_ts, gammas_t))
         return x

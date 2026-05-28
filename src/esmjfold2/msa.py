@@ -56,8 +56,16 @@ class MSAEncoder(eqx.Module):
         m = self.embed(m_feat) + self.project_inputs(x_inputs)[:, :, None, :]
         tok_mask = msa_attention_mask[:, :, 0].astype(jnp.bool_)
         pair_attention_mask = tok_mask[:, :, None] & tok_mask[:, None, :]
+        # Checkpoint each block so backward recomputes the OPM / triangle /
+        # transition intermediates instead of storing them — roughly ~2x
+        # forward compute for ~4x activation-memory reduction at depth=1024.
+        # `eqx.filter_checkpoint` (not raw `jax.checkpoint`) handles
+        # equinox-module callables whose parameters are JAX arrays.
+        import equinox as eqx
         for block in self.blocks:
-            m, x_pair = block(m, x_pair, msa_attention_mask, pair_attention_mask)
+            m, x_pair = eqx.filter_checkpoint(block)(
+                m, x_pair, msa_attention_mask, pair_attention_mask
+            )
         return x_pair
 
     @classmethod
