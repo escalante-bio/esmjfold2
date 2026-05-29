@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Int
 
 from .backend import AbstractFromTorch, from_torch
-from .primitives import Embedding, LayerNorm, Linear
+from .primitives import Embedding, LayerNorm, Linear, Sequential
 
 
 class LayerNormLinear(eqx.Module):
@@ -277,6 +277,39 @@ class ESMC(eqx.Module):
         return cls(embed=from_torch(model.embed), transformer=from_torch(model.transformer))
 
 
+class ESMCForMaskedLM(AbstractFromTorch):
+    """ESMC backbone + masked-LM head, mirroring PyTorch ``ESMCForMaskedLM``.
+
+    The head is the same ``Linear → GELU → LayerNorm → Linear`` projection to
+    ``vocab_size`` that ESMC is pre-trained with (``_esmc_lm_head``), stored as
+    a :class:`~esmjfold2.primitives.Sequential` so the state-dict layout matches
+    (``lm_head.0`` / ``lm_head.2`` / ``lm_head.3``).
+    """
+
+    esmc: ESMC
+    lm_head: Sequential
+
+    def __call__(self, input_ids, sequence_id=None, *, collect_hidden_states: bool = False):
+        """Args:
+            input_ids: [B, S] int32 token indices
+            sequence_id: [B, S] int chain-id (same id = can attend; -1 = padding),
+                or ``None`` to disable chain-aware masking.
+            collect_hidden_states: also return the stacked backbone hidden states.
+
+        Returns:
+            ``logits`` of shape ``[B, S, vocab_size]`` when ``collect_hidden_states``
+            is False (default), else ``(logits, hidden_states)`` where
+            ``hidden_states`` is ``[n_layers + 1, B, S, D]``.
+        """
+        last_hidden_state, hidden_states = self.esmc(
+            input_ids, sequence_id, collect_hidden_states=collect_hidden_states
+        )
+        logits = self.lm_head(last_hidden_state)
+        if collect_hidden_states:
+            return logits, hidden_states
+        return logits
+
+
 def _convert_te_layernorm_linear(m):
     """Transformer Engine ``LayerNormLinear`` exposes ``layer_norm_weight``,
     ``layer_norm_bias`` and ``weight`` — same as the pure-PyTorch fallback —
@@ -293,6 +326,7 @@ def register():
     """Register ESMC submodule converters."""
     import torch.nn as tnn
     from transformers.models.esmc.modeling_esmc import (
+        ESMCForMaskedLM as PTESMCForMaskedLM,
         ESMCModel,
         MultiHeadAttention as PTMultiHeadAttention,
         RotaryEmbedding as PTRotaryEmbedding,
@@ -309,6 +343,7 @@ def register():
     from_torch.register(PTUnifiedTransformerBlock, UnifiedTransformerBlock.from_torch)
     from_torch.register(PTTransformerStack, TransformerStack.from_torch)
     from_torch.register(ESMCModel, ESMC.from_torch)
+    from_torch.register(PTESMCForMaskedLM, ESMCForMaskedLM.from_torch)
 
     # Also register the TE fused modules when TE is installed: they share the
     # same parameter names as the PyTorch fallback.

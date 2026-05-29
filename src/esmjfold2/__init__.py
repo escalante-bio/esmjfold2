@@ -5,7 +5,7 @@ the Biohub transformers fork. Pure inference (after conversion + save) does
 not require torch.
 """
 
-from .esmc import ESMC
+from .esmc import ESMC, ESMCForMaskedLM
 from .experimental import ESMFold2Experimental
 from .features import Features
 from .lm_features import compute_lm_hidden_states
@@ -39,6 +39,7 @@ def prepare_protein_features(sequence: str):
 
 __all__ = [
     "ESMC",
+    "ESMCForMaskedLM",
     "ESMFold2",
     "ESMFold2Experimental",
     "Features",
