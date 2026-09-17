@@ -25,13 +25,14 @@ in [`NOTICE`](NOTICE):
 ```bash
 # Install all dependencies, including the native Biohub Torch loader.
 uv sync
-# For JAX on a CUDA 12 GPU, use: uv sync --extra cuda12
+# For CUDA 12, use `uv sync --extra cuda12` and add `--extra cuda12`
+# to each `uv run` command below.
 
-# Single protein, default model is ESMFold2-Fast (no MSA encoder)
-uv run --no-sync python scripts/predict.py --seq MQIFVKTLTGKT...
+# Ubiquitin, default model is ESMFold2-Fast (no MSA encoder)
+uv run python scripts/predict.py
 
 # Multi-chain complex, full ESMFold2 with MSAs and per-loop subsampling
-uv run --no-sync python scripts/predict.py \
+uv run python scripts/predict.py \
     --checkpoint biohub/ESMFold2 \
     --chains "A:peptide_seq,B:hla_seq,F:vhh_seq" \
     --msa B=B_HLA.a3m --msa F=F_VHH.a3m \
