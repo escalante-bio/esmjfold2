@@ -23,8 +23,13 @@ in [`NOTICE`](NOTICE):
 ### Quickstart from the CLI
 
 ```bash
-# Single protein, default model is ESMFold2-Fast (no MSA encoder)
-uv run python scripts/predict.py --seq MQIFVKTLTGKT...
+# Install all dependencies, including the native Biohub Torch loader.
+uv sync
+# For CUDA 12, use `uv sync --extra cuda12` and add `--extra cuda12`
+# to each `uv run` command below.
+
+# Ubiquitin, default model is ESMFold2-Fast (no MSA encoder)
+uv run python scripts/predict.py
 
 # Multi-chain complex, full ESMFold2 with MSAs and per-loop subsampling
 uv run python scripts/predict.py \
@@ -38,6 +43,12 @@ Output is a multi-model mmCIF (one `MODEL` per diffusion sample, best ordered
 first by ranking score), plus a JSON sidecar with per-sample pTM / ipTM /
 pLDDT.
 
+Conversion uses `esm==3.4.1.post1`, which loads the native Torch model and
+translates published checkpoint layouts. The old Biohub Transformers fork is
+no longer required. Torch weights load on CPU; JAX uses its available device.
+GPU preallocation stays enabled, with `XLA_PYTHON_CLIENT_MEM_FRACTION` controlling
+the memory budget (the prediction CLI defaults to `0.75`).
+
 ### Programmatic use
 
 ```python
@@ -45,16 +56,15 @@ import jax, torch, equinox as eqx
 import esmjfold2
 from esm.models.esmfold2 import ESMFold2InputBuilder, ProteinInput, StructurePredictionInput
 from esm.utils.msa import MSA
-from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
+from esm.models.esmfold2 import EsmFold2Model
 
 # 1. Load and convert the torch reference to JAX/Equinox.
-torch_model = ESMFold2Model.from_pretrained(
-    "biohub/ESMFold2", load_esmc=True, dtype=torch.float32,
+torch_model = EsmFold2Model.from_pretrained(
+    "biohub/ESMFold2", load_esmc=True, device="cpu",
+    dtype=torch.float32, esmc_precision="fp32",
 ).eval()
-torch_model._esmc = torch_model._esmc.to(dtype=torch.float32)
-torch_model._esmc_fp8 = False
 
-eqx_esmc  = esmjfold2.from_torch(torch_model._esmc)    # 6.3B-param ESMC LM
+eqx_esmc  = esmjfold2.from_torch(torch_model.esmc)    # 6.3B-param ESMC LM
 eqx_trunk = esmjfold2.from_torch(torch_model)          # ~189M trunk+head
 
 # 2. Featurize a complex.
@@ -90,7 +100,7 @@ print(out.sample_atom_coords.shape)                                    # (1, n_a
 # 5. Write structure as mmCIF.
 cif = esmjfold2.output_to_mmcif(
     coords=out.sample_atom_coords[0],
-    plddt=out.plddt_per_atom[0],
+    plddt=out.plddt[0],
     atom_mask=features.atom_attention_mask[0],
     ref_element=features.ref_element[0],
     ref_atom_name_chars=features.ref_atom_name_chars[0],

@@ -11,18 +11,18 @@ dependencies = [
     "jax>=0.10.0",
     "jaxtyping>=0.3.2",
     "numpy>=1.26.3",
+    "torch",
+    "accelerate",
+    "safetensors",
+    # Native Torch models and checkpoint-layout translation from Biohub.
+    "esm==3.4.1.post1",
 ]
 
 [project.optional-dependencies]
-convert = [
-    "torch",
-    "transformer-engine[pytorch]; sys_platform == 'linux'",
-    "accelerate",
-    "safetensors",
-    # transformers fork that ships ESMFold2 architecture
-    "transformers @ git+https://github.com/Biohub/transformers.git",
-    "esm @ git+https://github.com/Biohub/esm.git",
-]
+cuda12 = ["jax[cuda12]>=0.10.0"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [build-system]
 requires = ["hatchling"]

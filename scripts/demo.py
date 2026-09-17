@@ -15,8 +15,8 @@ import equinox as eqx
 import numpy as np
 import torch
 
-from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
-from transformers.models.esmfold2.protein_utils import prepare_protein_features
+from esm.models.esmfold2 import EsmFold2Model
+from esm.models.esmfold2.protein_utils import prepare_protein_features
 
 import esmjfold2
 
@@ -33,14 +33,15 @@ def main():
 
     print(f"Loading ESMFold2-Fast (include_lm={args.include_lm})...")
     t0 = time.time()
-    model = ESMFold2Model.from_pretrained(
+    model = EsmFold2Model.from_pretrained(
         "biohub/ESMFold2-Fast",
+        device="cpu",
         load_esmc=args.include_lm,
         dtype=torch.float32,
-        esmc_precision="bf16" if args.include_lm else None,
+        esmc_precision="fp32",
     ).eval()
     print(f"  loaded in {time.time()-t0:.1f}s. Trunk+head params: ", end="")
-    print(f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('_esmc')):,}")
+    print(f"{sum(p.numel() for n, p in model.named_parameters() if not n.startswith('esmc.')):,}")
 
     features = prepare_protein_features(args.seq)
     B, L = features["res_type"].shape
@@ -50,15 +51,12 @@ def main():
     eqx_model = esmjfold2.from_torch(model)
     print(f"  {time.time()-t0:.1f}s")
 
-    features_jax = {k: jnp.asarray(v.cpu().numpy()) for k, v in features.items()}
+    features_jax = esmjfold2.Features.from_input_builder(features)
 
     if args.include_lm:
         print("Converting ESMC-6B to JAX/Equinox...")
-        # Force fp32 weights for the JAX conversion.
-        model._esmc = model._esmc.to(dtype=torch.float32)
-        model._esmc_fp8 = False
         t0 = time.time()
-        eqx_esmc = esmjfold2.from_torch(model._esmc)
+        eqx_esmc = esmjfold2.from_torch(model.esmc)
         print(f"  {time.time()-t0:.1f}s")
         print("Computing LM features in JAX...")
         t0 = time.time()
@@ -90,19 +88,19 @@ def main():
           f"{args.num_sampling_steps}, loops={args.num_loops})...")
     t0 = time.time()
     out = predict(eqx_model, features_jax, lm_jax, jax.random.key(0))
-    out["sample_atom_coords"].block_until_ready()
+    out.sample_atom_coords.block_until_ready()
     print(f"  JIT compile + first run: {time.time()-t0:.1f}s")
     t0 = time.time()
     out = predict(eqx_model, features_jax, lm_jax, jax.random.key(0))
-    out["sample_atom_coords"].block_until_ready()
+    out.sample_atom_coords.block_until_ready()
     print(f"  cached run: {(time.time()-t0)*1000:.1f}ms")
 
     print("\n=== Output ===")
-    print(f"sample_atom_coords: {out['sample_atom_coords'].shape}")
-    print(f"plddt:              {out['plddt'].shape}, mean={float(out['plddt'].mean()):.3f}")
-    print(f"ptm:                {float(out['ptm'][0]):.3f}")
-    print(f"distogram_logits:   {out['distogram_logits'].shape}")
-    print(f"pae:                {out['pae'].shape}, mean={float(out['pae'].mean()):.3f}")
+    print(f"sample_atom_coords: {out.sample_atom_coords.shape}")
+    print(f"plddt:              {out.plddt.shape}, mean={float(out.plddt.mean()):.3f}")
+    print(f"ptm:                {float(out.ptm[0]):.3f}")
+    print(f"distogram_logits:   {out.distogram_logits.shape}")
+    print(f"pae:                {out.pae.shape}, mean={float(out.pae.mean()):.3f}")
 
 
 if __name__ == "__main__":

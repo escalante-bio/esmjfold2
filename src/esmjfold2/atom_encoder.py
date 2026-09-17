@@ -137,5 +137,5 @@ class ESMFold2AtomDecoder(AbstractFromTorch):
 def register():
     from .modeling_refs import _esm
     common, _ = _esm()
-    from_torch.register(common.ESMFold2AtomEncoder, ESMFold2AtomEncoder.from_torch)
-    from_torch.register(common.ESMFold2AtomDecoder, ESMFold2AtomDecoder.from_torch)
+    from_torch.register(common.EsmFold2AtomEncoder, ESMFold2AtomEncoder.from_torch)
+    from_torch.register(common.EsmFold2AtomDecoder, ESMFold2AtomDecoder.from_torch)

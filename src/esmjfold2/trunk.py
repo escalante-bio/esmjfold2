@@ -87,8 +87,8 @@ def register():
     common, _ = _esm()
     # Transition / PairTransition both wrap a LN + SwiGLU. Tell apart by class.
     from_torch.register(common.Transition, Transition.from_torch)
-    # PairTransition lives in modeling_esmfold2.py
-    from transformers.models.esmfold2 import modeling_esmfold2
-    from_torch.register(modeling_esmfold2.PairTransition, PairTransition.from_torch)
+    # PairTransition lives in the model module.
+    from esm.models.esmfold2 import model
+    from_torch.register(model.PairTransition, PairTransition.from_torch)
     from_torch.register(common.PairUpdateBlock, PairUpdateBlock.from_torch)
     from_torch.register(common.FoldingTrunk, FoldingTrunk.from_torch)

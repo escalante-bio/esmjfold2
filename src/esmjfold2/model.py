@@ -542,10 +542,10 @@ class ESMFold2(eqx.Module):
             distogram_head=from_torch(model.distogram_head),
             confidence_head=from_torch(model.confidence_head),
             msa_encoder=from_torch(model.msa_encoder) if model.msa_encoder is not None else None,
-            d_pair=int(cfg.d_pair),
+            d_pair=int(cfg.pairwise_hidden_size),
             num_loops=int(cfg.num_loops),
             num_diffusion_samples=int(cfg.num_diffusion_samples),
-            msa_encoder_overwrite=bool(cfg.msa_encoder_overwrite),
+            msa_encoder_overwrite=bool(cfg.msa_encoder.overwrite),
             lm_dropout=float(getattr(cfg.lm_encoder, "lm_dropout", 0.0)),
             per_loop_lm_dropout=bool(getattr(cfg.lm_encoder, "per_loop_lm_dropout", False)),
         )
@@ -559,4 +559,4 @@ def register():
     from_torch.register(common.DiffusionConditioning, DiffusionConditioning.from_torch)
     from_torch.register(common.DiffusionModule, DiffusionModule.from_torch)
     from_torch.register(common.DiffusionStructureHead, DiffusionStructureHead.from_torch)
-    from_torch.register(modeling.ESMFold2Model, ESMFold2.from_torch)
+    from_torch.register(modeling.EsmFold2Model, ESMFold2.from_torch)
