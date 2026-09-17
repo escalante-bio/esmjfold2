@@ -180,11 +180,6 @@ def parse_args() -> argparse.Namespace:
         "loaded MSA is shallower than this. Pass --msa-max-depth=-1 to "
         "disable subsampling and match the HF torch reference behaviour.",
     )
-    p.add_argument(
-        "--device",
-        default="cpu",
-        help="Torch loading device (default: cpu). JAX selects its own inference device.",
-    )
     return p.parse_args()
 
 
@@ -236,7 +231,7 @@ def main() -> None:
         EsmFold2Model.from_pretrained(
             args.checkpoint,
             load_esmc=True,
-            device=args.device,
+            device="cpu",
             dtype=torch.float32,
             esmc_precision="fp32",
         )

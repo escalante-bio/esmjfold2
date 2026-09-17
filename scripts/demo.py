@@ -35,6 +35,7 @@ def main():
     t0 = time.time()
     model = EsmFold2Model.from_pretrained(
         "biohub/ESMFold2-Fast",
+        device="cpu",
         load_esmc=args.include_lm,
         dtype=torch.float32,
         esmc_precision="fp32",
