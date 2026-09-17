@@ -1,7 +1,7 @@
 """JAX/Equinox translation of ESMFold2.
 
 The pretrained model is loaded via ``from_torch``; this requires torch and
-the Biohub transformers fork. Pure inference (after conversion + save) does
+the Biohub esm package. Pure inference (after conversion + save) does
 not require torch.
 """
 
@@ -20,7 +20,7 @@ from .structure_output import (
 
 
 def from_torch(x):
-    """Convert a PyTorch ESMFold2Model (or any registered submodule) to JAX/Equinox."""
+    """Convert a native Torch EsmFold2Model (or registered submodule) to JAX/Equinox."""
     from .convert import from_torch as _from_torch
     return _from_torch(x)
 
@@ -28,11 +28,11 @@ def from_torch(x):
 def prepare_protein_features(sequence: str):
     """Featurize a protein sequence to JAX arrays.
 
-    Uses the torch implementation from the Biohub fork to ensure tensor-exact
+    Uses the torch implementation from the Biohub esm package to ensure tensor-exact
     parity with the reference model.
     """
     import jax.numpy as jnp
-    from transformers.models.esmfold2.protein_utils import prepare_protein_features as _ppf
+    from esm.models.esmfold2.protein_utils import prepare_protein_features as _ppf
     feats = _ppf(sequence)
     return {k: jnp.asarray(v.cpu().numpy()) for k, v in feats.items()}
 

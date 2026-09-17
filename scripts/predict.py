@@ -8,15 +8,15 @@ Usage
 -----
 Single chain (default = ubiquitin / 1UBQ):
 
-    uv run python scripts/predict.py
+    uv run --extra convert python scripts/predict.py
 
 Specify a sequence:
 
-    uv run python scripts/predict.py --seq MQIFVKTLT... --out ubq.cif
+    uv run --extra convert python scripts/predict.py --seq MQIFVKTLT... --out ubq.cif
 
 Multi-chain protein complex (chain spec ``ID:SEQ`` separated by commas):
 
-    uv run python scripts/predict.py \\
+    uv run --extra convert python scripts/predict.py \\
         --chains "A:GSHSMRY...,B:IQRTPK...,C:SLLMWITQC" \\
         --out complex.cif
 
@@ -30,8 +30,8 @@ Sampling knobs (defaults match ESMFold2-Fast inference defaults):
 GPU memory notes
 ----------------
 ESMC-6B in fp32 takes ~25 GB GPU. After running it once we free its weights
-before invoking the JIT-compiled trunk to leave headroom. Default JAX
-preallocation is disabled so torch + JAX can share the GPU.
+before invoking the JIT-compiled trunk to leave headroom. JAX preallocation
+stays enabled; XLA_PYTHON_CLIENT_MEM_FRACTION controls its GPU memory budget.
 """
 from __future__ import annotations
 
@@ -44,8 +44,7 @@ import time
 from pathlib import Path
 
 # Must be set before importing JAX.
-os.environ.setdefault("JAX_PLATFORMS", "cuda")
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.75")
 
 import numpy as np
 import torch
@@ -61,7 +60,7 @@ from esm.models.esmfold2 import (
     ProteinInput,
     StructurePredictionInput,
 )
-from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
+from esm.models.esmfold2 import EsmFold2Model
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +182,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--device",
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Torch device for ESMC and the conversion step.",
+        default="cpu",
+        help="Torch loading device (default: cpu). JAX selects its own inference device.",
     )
     return p.parse_args()
 
@@ -231,19 +230,18 @@ def main() -> None:
     #    ESMC is loaded on CPU here so it doesn't fight JAX for GPU memory
     #    while we convert; we'll only ever run it via the JAX path below.
     # ------------------------------------------------------------------
-    print(f"\nLoading {args.checkpoint} (with ESMC-6B; this allocates ~12 GB of CPU RAM)...")
+    print(f"\nLoading {args.checkpoint} (with ESMC-6B; this allocates ~26 GB of CPU RAM)...")
     t0 = time.time()
     torch_model = (
-        ESMFold2Model.from_pretrained(
+        EsmFold2Model.from_pretrained(
             args.checkpoint,
             load_esmc=True,
+            device=args.device,
             dtype=torch.float32,
-            esmc_precision="bf16",
+            esmc_precision="fp32",
         )
         .eval()
     )
-    torch_model._esmc = torch_model._esmc.to(dtype=torch.float32)
-    torch_model._esmc_fp8 = False
     print(f"  loaded in {time.time() - t0:.1f}s")
 
     # ------------------------------------------------------------------
@@ -251,7 +249,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("Converting ESMC + ESMFold2 trunk/head to JAX...")
     t0 = time.time()
-    eqx_esmc = esmjfold2.from_torch(torch_model._esmc)
+    eqx_esmc = esmjfold2.from_torch(torch_model.esmc)
     eqx_trunk = esmjfold2.from_torch(torch_model)
     print(f"  converted in {time.time() - t0:.1f}s")
     # Free the torch reference now that we have JAX copies.

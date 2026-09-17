@@ -740,7 +740,7 @@ class ESMFold2Experimental(eqx.Module):
                 if model.msa_encoder is not None
                 else None
             ),
-            d_pair=int(cfg.d_pair),
+            d_pair=int(cfg.pairwise_hidden_size),
             num_loops=int(cfg.num_loops),
             num_diffusion_samples=int(cfg.num_diffusion_samples),
             lm_dropout=float(getattr(cfg, "lm_dropout", 0.0)),
@@ -753,11 +753,11 @@ class ESMFold2Experimental(eqx.Module):
 
 
 def register():
-    from transformers.models.esmfold2 import modeling_esmfold2_experimental as ex
+    from esm.models.esmfold2 import experimental as ex
 
     from_torch.register(ex.MSAEncoderBlock, MSAEncoderBlockExperimental.from_torch)
     from_torch.register(ex.MSAEncoder, MSAEncoderExperimental.from_torch)
     from_torch.register(ex.ConfidenceHead, ConfidenceHeadExperimental.from_torch)
-    from_torch.register(ex.ESMFold2ExperimentalModel, ESMFold2Experimental.from_torch)
+    from_torch.register(ex.EsmFold2ExperimentalModel, ESMFold2Experimental.from_torch)
     # _TransitionFFN has the same field layout as our PairTransition (LN + SwiGLU).
     from_torch.register(ex._TransitionFFN, PairTransition.from_torch)

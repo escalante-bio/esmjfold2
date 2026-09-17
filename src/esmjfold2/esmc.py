@@ -2,8 +2,8 @@
 # Translated from PyTorch reference Copyright 2026 Biohub. All rights reserved.
 """JAX/Equinox translation of ESMC (the language-model backbone of ESMFold2).
 
-Translates the pure-PyTorch fallback path in ``transformers.models.esmc.modeling_esmc``:
-``_PyTorchLayerNormLinear`` (LN+Linear), ``_PyTorchLayerNormMLP`` (LN+SwiGLU FFN),
+Translates the pure-PyTorch fallback path in ``esm.models.esmc.model``:
+``EsmcLayerNormLinear`` (LN+Linear), ``EsmcLayerNormMLP`` (LN+SwiGLU FFN),
 ``RotaryEmbedding``, ``MultiHeadAttention``, ``UnifiedTransformerBlock``,
 ``TransformerStack``, ``ESMCModel``. The accelerated Transformer-Engine fused
 modules share the same state-dict layout as the pure-PyTorch fallback, so the
@@ -26,7 +26,7 @@ from .primitives import Embedding, LayerNorm, Linear, Sequential
 
 class LayerNormLinear(eqx.Module):
     """``layer_norm(x) @ weight^T``, sharing the state-dict layout of the
-    PyTorch fused TE module and its ``_PyTorchLayerNormLinear`` fallback.
+    PyTorch fused TE module and its ``EsmcLayerNormLinear`` fallback.
     """
 
     layer_norm_weight: Float[Array, "D_in"]
@@ -324,26 +324,24 @@ def _convert_te_layernorm_mlp(m):
 
 def register():
     """Register ESMC submodule converters."""
-    import torch.nn as tnn
-    from transformers.models.esmc.modeling_esmc import (
-        ESMCForMaskedLM as PTESMCForMaskedLM,
-        ESMCModel,
-        MultiHeadAttention as PTMultiHeadAttention,
-        RotaryEmbedding as PTRotaryEmbedding,
-        TransformerStack as PTTransformerStack,
-        UnifiedTransformerBlock as PTUnifiedTransformerBlock,
-        _PyTorchLayerNormLinear,
-        _PyTorchLayerNormMLP,
+    from esm.models.esmc import EsmcForMaskedLM, EsmcModel
+    from esm.models.esmc.layers import (
+        EsmcLayerNormLinear,
+        EsmcLayerNormMLP,
+        EsmcMultiHeadAttention,
+        EsmcRotaryEmbedding,
+        EsmcTransformerStack,
+        EsmcUnifiedTransformerBlock,
     )
 
-    from_torch.register(_PyTorchLayerNormLinear, LayerNormLinear.from_torch)
-    from_torch.register(_PyTorchLayerNormMLP, LayerNormMLP.from_torch)
-    from_torch.register(PTRotaryEmbedding, RotaryEmbedding.from_torch)
-    from_torch.register(PTMultiHeadAttention, MultiHeadAttention.from_torch)
-    from_torch.register(PTUnifiedTransformerBlock, UnifiedTransformerBlock.from_torch)
-    from_torch.register(PTTransformerStack, TransformerStack.from_torch)
-    from_torch.register(ESMCModel, ESMC.from_torch)
-    from_torch.register(PTESMCForMaskedLM, ESMCForMaskedLM.from_torch)
+    from_torch.register(EsmcLayerNormLinear, LayerNormLinear.from_torch)
+    from_torch.register(EsmcLayerNormMLP, LayerNormMLP.from_torch)
+    from_torch.register(EsmcRotaryEmbedding, RotaryEmbedding.from_torch)
+    from_torch.register(EsmcMultiHeadAttention, MultiHeadAttention.from_torch)
+    from_torch.register(EsmcUnifiedTransformerBlock, UnifiedTransformerBlock.from_torch)
+    from_torch.register(EsmcTransformerStack, TransformerStack.from_torch)
+    from_torch.register(EsmcModel, ESMC.from_torch)
+    from_torch.register(EsmcForMaskedLM, ESMCForMaskedLM.from_torch)
 
     # Also register the TE fused modules when TE is installed: they share the
     # same parameter names as the PyTorch fallback.

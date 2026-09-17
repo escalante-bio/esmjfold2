@@ -3,7 +3,7 @@
 """Compute ESMFold2 LM features in JAX.
 
 Mirrors ``ESMFold2Model._compute_lm_hidden_states`` (which mirrors
-``transformers.models.esmfold2.modeling_esmfold2_common.compute_lm_hidden_states``):
+``esm.models.esmfold2.layers.compute_lm_hidden_states``):
 
 1. Per-batch-element, dedup protein tokens by (asym_id, residue_index) so
    multi-atom-tokenized residues collapse to a single LM token.
