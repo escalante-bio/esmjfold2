@@ -8,15 +8,15 @@ Usage
 -----
 Single chain (default = ubiquitin / 1UBQ):
 
-    uv run --extra convert python scripts/predict.py
+    uv run python scripts/predict.py
 
 Specify a sequence:
 
-    uv run --extra convert python scripts/predict.py --seq MQIFVKTLT... --out ubq.cif
+    uv run python scripts/predict.py --seq MQIFVKTLT... --out ubq.cif
 
 Multi-chain protein complex (chain spec ``ID:SEQ`` separated by commas):
 
-    uv run --extra convert python scripts/predict.py \\
+    uv run python scripts/predict.py \\
         --chains "A:GSHSMRY...,B:IQRTPK...,C:SLLMWITQC" \\
         --out complex.cif
 

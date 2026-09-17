@@ -6,8 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("esm")
+import torch
 
 from esm.models.esmc import EsmcConfig, EsmcForMaskedLM, EsmcModel
 from esm.models.esmfold2 import EsmFold2Config, EsmFold2ExperimentalModel, EsmFold2Model

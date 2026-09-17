@@ -11,17 +11,15 @@ dependencies = [
     "jax>=0.10.0",
     "jaxtyping>=0.3.2",
     "numpy>=1.26.3",
-]
-
-[project.optional-dependencies]
-cuda12 = ["jax[cuda12]>=0.10.0"]
-convert = [
     "torch",
     "accelerate",
     "safetensors",
     # Native Torch models and checkpoint-layout translation from Biohub.
     "esm==3.4.1.post1",
 ]
+
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]>=0.10.0"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

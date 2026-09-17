@@ -23,9 +23,9 @@ in [`NOTICE`](NOTICE):
 ### Quickstart from the CLI
 
 ```bash
-# Install the native Biohub Torch loader and conversion dependencies.
-uv sync --extra convert
-# For JAX on a CUDA 12 GPU, use: uv sync --extra convert --extra cuda12
+# Install all dependencies, including the native Biohub Torch loader.
+uv sync
+# For JAX on a CUDA 12 GPU, use: uv sync --extra cuda12
 
 # Single protein, default model is ESMFold2-Fast (no MSA encoder)
 uv run --no-sync python scripts/predict.py --seq MQIFVKTLTGKT...
