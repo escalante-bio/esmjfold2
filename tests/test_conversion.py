@@ -140,8 +140,17 @@ def test_folding_components_parity(config):
     )
     with torch.no_grad():
         expected = model.structure_head.diffusion_module(**torch_args)["x_denoised"]
-    actual = eqx.filter_jit(converted.structure_head.diffusion_module)(
+    diffusion_module = converted.structure_head.diffusion_module
+    actual = eqx.filter_jit(diffusion_module)(
         **args, ref_element_oh=ctx.ref_element_oh,
         ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh, n_tokens=3,
     )
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=3e-5, atol=3e-5)
+
+    x_noisy, t_hat = args.pop("x_noisy"), args.pop("t_hat")
+    cache = eqx.filter_jit(diffusion_module.prepare)(
+        **args, ref_element_oh=ctx.ref_element_oh,
+        ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh, n_tokens=3,
+    )
+    actual = eqx.filter_jit(diffusion_module.denoise)(cache, x_noisy, t_hat)
     np.testing.assert_allclose(actual, expected.numpy(), rtol=3e-5, atol=3e-5)
