@@ -10,7 +10,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float, Int
 
 from .adaln import FourierEmbedding, TransitionLayer
 from .atom_encoder import ESMFold2AtomDecoder, ESMFold2AtomEncoder
@@ -88,16 +88,16 @@ class DiffusionConditioning(AbstractFromTorch):
 class DiffusionCache(eqx.Module):
     """σ-independent inputs of one ``DiffusionModule`` step (see ``DiffusionModule.prepare``)."""
 
-    s: Array                  # projected s_inputs, [B, L, c_s]
-    pair_bias: Array          # per-block token-transformer pair bias, [n_blocks, B, L, L, H]
-    ref_pos: Array
-    ref_charge: Array
-    ref_mask: Array
-    ref_element_oh: Array
-    ref_atom_name_chars_oh: Array
-    ref_space_uid: Array
-    tok_idx: Array
-    token_attention_mask: Array | None
+    s: Float[Array, "B L Cs"]  # projected s_inputs
+    pair_bias: Float[Array, "NB B L L H"]  # per-block token-transformer pair bias
+    ref_pos: Float[Array, "B A 3"]
+    ref_charge: Int[Array, "B A"]
+    ref_mask: Bool[Array, "B A"]
+    ref_element_oh: Float[Array, "B A E"]
+    ref_atom_name_chars_oh: Float[Array, "B A 4 V"]
+    ref_space_uid: Int[Array, "B A"]
+    tok_idx: Int[Array, "B A"]
+    token_attention_mask: Bool[Array, "B L"] | None
     n_tokens: int = eqx.field(static=True)
 
 
