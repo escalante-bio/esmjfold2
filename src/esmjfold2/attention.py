@@ -29,13 +29,14 @@ class AttentionPairBias(AbstractFromTorch):
     num_heads: int = 0
     head_dim: int = 0
 
-    def __call__(self, a, s, z, beta=0.0, attention_mask=None):
+    def __call__(self, a, s, z, beta=0.0, attention_mask=None, pair_bias=None):
         """Single-batch attention with pair bias.
 
         a:    [B, L, d_model] — queries / keys / values
         s:    [B, L, d_cond] or None (no conditioning → pre_norm)
         z:    [B, L, L, d_pair]
         attention_mask: [B, L] bool (1 = valid)
+        pair_bias: [B, L, L, H] precomputed ``compute_pair_bias(z)``; z is then unused
         """
         bsz, n, d_model = a.shape
 
@@ -56,8 +57,9 @@ class AttentionPairBias(AbstractFromTorch):
         # logits [B, Lq, Lk, H]
         logits = jnp.einsum("biha,bjha->bijh", q, k) * scale
 
-        if z is not None and self.pair_bias_proj is not None:
-            pair_bias = self.pair_bias_proj(self.pair_norm(z))  # [B, L, L, H]
+        if pair_bias is None and z is not None and self.pair_bias_proj is not None:
+            pair_bias = self.compute_pair_bias(z)
+        if pair_bias is not None:
             logits = logits + pair_bias
 
         if attention_mask is not None:
@@ -76,6 +78,9 @@ class AttentionPairBias(AbstractFromTorch):
             out = jax.nn.sigmoid(self.out_gate(s)) * out
         return out
 
+    def compute_pair_bias(self, z):
+        return self.pair_bias_proj(self.pair_norm(z))  # [B, L, L, H]
+
 
 class _AttentionTransitionPair(eqx.Module):
     """One DiffusionTransformer block — attention + transition."""
@@ -83,8 +88,8 @@ class _AttentionTransitionPair(eqx.Module):
     attn: AttentionPairBias
     transition: ConditionedTransitionBlock
 
-    def __call__(self, x, s, z, attention_mask=None):
-        x = x + self.attn(x, s, z, attention_mask=attention_mask)
+    def __call__(self, x, s, z, attention_mask=None, pair_bias=None):
+        x = x + self.attn(x, s, z, attention_mask=attention_mask, pair_bias=pair_bias)
         x = x + self.transition(x, s)
         return x
 
@@ -95,13 +100,21 @@ class DiffusionTransformer(eqx.Module):
     block_params: _AttentionTransitionPair
     block_static: _AttentionTransitionPair
 
-    def __call__(self, a, s, z, attention_mask=None):
-        @jax.checkpoint
-        def body(state, params):
-            block = eqx.combine(self.block_static, params)
-            return block(state, s, z, attention_mask=attention_mask), None
+    def compute_pair_bias(self, z):
+        """Per-block pair bias of z, stacked: [n_blocks, B, L, L, H]."""
+        return jax.vmap(
+            lambda params: eqx.combine(self.block_static, params).attn.compute_pair_bias(z)
+        )(self.block_params)
 
-        out, _ = jax.lax.scan(body, a, self.block_params)
+    def __call__(self, a, s, z, attention_mask=None, pair_bias=None):
+        """``pair_bias``: optional precomputed ``compute_pair_bias(z)``; z is then unused."""
+        @jax.checkpoint
+        def body(state, inputs):
+            params, block_pair_bias = inputs
+            block = eqx.combine(self.block_static, params)
+            return block(state, s, z, attention_mask=attention_mask, pair_bias=block_pair_bias), None
+
+        out, _ = jax.lax.scan(body, a, (self.block_params, pair_bias))
         return out
 
     @classmethod

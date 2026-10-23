@@ -10,7 +10,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float, Int
 
 from .adaln import FourierEmbedding, TransitionLayer
 from .atom_encoder import ESMFold2AtomDecoder, ESMFold2AtomEncoder
@@ -37,7 +37,11 @@ class DiffusionConditioning(AbstractFromTorch):
     c_s_inputs: int
 
     def __call__(self, t_hat, s_inputs, z_trunk, relative_position_encoding):
-        # z conditioning (only once across diffusion steps; here we always recompute)
+        s, z = self.prepare(s_inputs, z_trunk, relative_position_encoding)
+        return self.condition_single(t_hat, s), z
+
+    def prepare(self, s_inputs, z_trunk, relative_position_encoding):
+        """σ-independent part: conditioned pair rep and projected single inputs."""
         z = jnp.concatenate(
             [z_trunk.astype(jnp.float32), relative_position_encoding.astype(jnp.float32)],
             axis=-1,
@@ -47,7 +51,10 @@ class DiffusionConditioning(AbstractFromTorch):
             z = z + block(z)
 
         s = self.s_proj(self.s_input_norm(s_inputs.astype(jnp.float32)))
+        return s, z
 
+    def condition_single(self, t_hat, s):
+        """Add the noise embedding of ``t_hat`` to ``s`` from ``prepare``."""
         t = jnp.asarray(t_hat, dtype=jnp.float32).reshape(-1)
         t_noise = 0.25 * jnp.log(jnp.clip(t / self.sigma_data, min=1e-20))
         n = self.fourier(t_noise)
@@ -57,7 +64,7 @@ class DiffusionConditioning(AbstractFromTorch):
         for block in self.s_transitions:
             s = s + block(s)
 
-        return s, z
+        return s
 
     @classmethod
     def from_torch(cls, model):
@@ -76,6 +83,22 @@ class DiffusionConditioning(AbstractFromTorch):
             c_s=int(model.c_s),
             c_s_inputs=int(model.c_s_inputs),
         )
+
+
+class DiffusionCache(eqx.Module):
+    """σ-independent inputs of one ``DiffusionModule`` step (see ``DiffusionModule.prepare``)."""
+
+    s: Float[Array, "B L Cs"]  # projected s_inputs
+    pair_bias: Float[Array, "NB B L L H"]  # per-block token-transformer pair bias
+    ref_pos: Float[Array, "B A 3"]
+    ref_charge: Int[Array, "B A"]
+    ref_mask: Bool[Array, "B A"]
+    ref_element_oh: Float[Array, "B A E"]
+    ref_atom_name_chars_oh: Float[Array, "B A 4 V"]
+    ref_space_uid: Int[Array, "B A"]
+    tok_idx: Int[Array, "B A"]
+    token_attention_mask: Bool[Array, "B L"] | None
+    n_tokens: int = eqx.field(static=True)
 
 
 class DiffusionModule(AbstractFromTorch):
@@ -102,33 +125,70 @@ class DiffusionModule(AbstractFromTorch):
         n_tokens,                        # static int
         token_attention_mask=None,
     ):
+        cache = self.prepare(
+            ref_pos=ref_pos, ref_charge=ref_charge, ref_mask=ref_mask,
+            ref_element_oh=ref_element_oh, ref_atom_name_chars_oh=ref_atom_name_chars_oh,
+            ref_space_uid=ref_space_uid, tok_idx=tok_idx,
+            s_inputs=s_inputs, z_trunk=z_trunk,
+            relative_position_encoding=relative_position_encoding,
+            n_tokens=n_tokens, token_attention_mask=token_attention_mask,
+        )
+        return self.denoise(cache, x_noisy, t_hat)
+
+    def prepare(
+        self,
+        *,
+        ref_pos, ref_charge, ref_mask,
+        ref_element_oh, ref_atom_name_chars_oh, ref_space_uid,
+        tok_idx,
+        s_inputs, z_trunk,
+        relative_position_encoding,
+        n_tokens,
+        token_attention_mask=None,
+    ) -> DiffusionCache:
+        """Compute the σ-independent conditioning once, for reuse by ``denoise``
+        across diffusion steps (XLA does not hoist it out of a sampler loop).
+        """
+        s, z = self.conditioning.prepare(s_inputs, z_trunk, relative_position_encoding)
+        return DiffusionCache(
+            s=s, pair_bias=self.token_transformer.compute_pair_bias(z),
+            ref_pos=ref_pos, ref_charge=ref_charge, ref_mask=ref_mask,
+            ref_element_oh=ref_element_oh, ref_atom_name_chars_oh=ref_atom_name_chars_oh,
+            ref_space_uid=ref_space_uid, tok_idx=tok_idx,
+            token_attention_mask=token_attention_mask, n_tokens=n_tokens,
+        )
+
+    def denoise(self, cache: DiffusionCache, x_noisy, t_hat):
+        """One denoiser call; equal to ``__call__`` with the inputs given to ``prepare``."""
         bsz = x_noisy.shape[0]
         t = jnp.broadcast_to(jnp.asarray(t_hat, dtype=jnp.float32).reshape(-1), (bsz,))
         sigma = self.sigma_data
-        s, z = self.conditioning(t, s_inputs, z_trunk, relative_position_encoding)
+        s = self.conditioning.condition_single(t, cache.s)
 
         denom = jnp.sqrt(t * t + sigma * sigma)
         r_noisy = x_noisy / denom[:, None, None]
 
         a, q_skip, c_skip, (cos, sin) = self.atom_encoder(
-            ref_pos=ref_pos,
-            atom_attention_mask=ref_mask,
-            ref_space_uid=ref_space_uid,
-            ref_charge=ref_charge,
-            ref_element_oh=ref_element_oh,
-            ref_atom_name_chars_oh=ref_atom_name_chars_oh,
-            atom_to_token=tok_idx,
+            ref_pos=cache.ref_pos,
+            atom_attention_mask=cache.ref_mask,
+            ref_space_uid=cache.ref_space_uid,
+            ref_charge=cache.ref_charge,
+            ref_element_oh=cache.ref_element_oh,
+            ref_atom_name_chars_oh=cache.ref_atom_name_chars_oh,
+            atom_to_token=cache.tok_idx,
             r_l=r_noisy,
-            n_tokens=n_tokens,
+            n_tokens=cache.n_tokens,
         )
 
         a = a + self.s_to_token(self.s_step_norm(s))
-        a = self.token_transformer(a, s, z, attention_mask=token_attention_mask)
+        a = self.token_transformer(
+            a, s, None, attention_mask=cache.token_attention_mask, pair_bias=cache.pair_bias
+        )
         a = self.token_norm(a)
 
         r_update = self.atom_decoder(
             a_i=a, q_l=q_skip, c_l=c_skip, cos=cos, sin=sin,
-            atom_to_token=tok_idx, atom_attention_mask=ref_mask,
+            atom_to_token=cache.tok_idx, atom_attention_mask=cache.ref_mask,
         )
 
         sigma2 = sigma * sigma
@@ -284,6 +344,18 @@ class DiffusionStructureHead(AbstractFromTorch):
         sigma_ts = sched[1:]
         gammas_t = gammas[1:]
 
+        cache = self.diffusion_module.prepare(
+            ref_pos=ref_pos, ref_charge=ref_charge, ref_mask=ref_mask,
+            ref_element_oh=ref_element_oh,
+            ref_atom_name_chars_oh=ref_atom_name_chars_oh,
+            ref_space_uid=ref_space_uid,
+            tok_idx=atom_to_token,
+            s_inputs=s_inputs, z_trunk=z_trunk,
+            relative_position_encoding=relative_position_encoding,
+            n_tokens=n_tokens,
+            token_attention_mask=token_attention_mask,
+        )
+
         def step(carry, inputs):
             x, key = carry
             sigma_tm, sigma_t, gamma = inputs
@@ -295,18 +367,8 @@ class DiffusionStructureHead(AbstractFromTorch):
             eps_std = lam * jnp.sqrt(jnp.clip(t_hat * t_hat - sigma_tm * sigma_tm, min=0.0))
             x_noisy = x + eps_std * jax.random.normal(k_noise, x.shape, dtype=x.dtype)
 
-            x_denoised = self.diffusion_module(
-                x_noisy=x_noisy,
-                t_hat=jnp.full((B,), t_hat, dtype=jnp.float32),
-                ref_pos=ref_pos, ref_charge=ref_charge, ref_mask=ref_mask,
-                ref_element_oh=ref_element_oh,
-                ref_atom_name_chars_oh=ref_atom_name_chars_oh,
-                ref_space_uid=ref_space_uid,
-                tok_idx=atom_to_token,
-                s_inputs=s_inputs, z_trunk=z_trunk,
-                relative_position_encoding=relative_position_encoding,
-                n_tokens=n_tokens,
-                token_attention_mask=token_attention_mask,
+            x_denoised = self.diffusion_module.denoise(
+                cache, x_noisy, jnp.full((B,), t_hat, dtype=jnp.float32)
             )
 
             # Rigid-align noisy onto denoised
