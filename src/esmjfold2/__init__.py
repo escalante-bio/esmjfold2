@@ -9,7 +9,7 @@ from .esmc import ESMC, ESMCForMaskedLM
 from .experimental import ESMFold2Experimental
 from .features import Features
 from .lm_features import compute_lm_hidden_states
-from .model import ESMFold2
+from .model import ESMFold2, TrunkInputs
 from .prediction import Prediction
 from .serialization import load_model, save_model
 from .structure_output import (
@@ -44,6 +44,7 @@ __all__ = [
     "ESMFold2Experimental",
     "Features",
     "Prediction",
+    "TrunkInputs",
     "compute_lm_hidden_states",
     "from_torch",
     "load_model",

@@ -51,7 +51,7 @@ from .inputs import (
     RowAttentionPooling,
 )
 from .language_model import LanguageModelShim
-from .model import _Context  # shared embedding context (same shape as release)
+from .model import TrunkInputs, _Context, _subsample_msa_rows  # shared with release model
 from .prediction import Prediction
 from .primitives import Embedding, LayerNorm, Linear, Sequential
 from .triangle import (
@@ -499,6 +499,65 @@ class ESMFold2Experimental(eqx.Module):
     # Phase 2: trunk refinement loop
     # ------------------------------------------------------------------
 
+    def embed(self, features: Features, lm_z=None, *, key=None) -> TrunkInputs:
+        """Build the trunk inputs that stay fixed across passes.
+
+        ``lm_z`` is the LM pair contribution,
+        ``self.language_model(lm_hidden_states)``, or ``None`` to skip LM
+        conditioning. This architecture applies its LM dropout once, here,
+        using ``key`` (required only when ``lm_dropout > 0`` and ``lm_z`` is
+        given).
+        """
+        return self._trunk_inputs(self._prepare_embeddings(features), lm_z, key)
+
+    def _trunk_inputs(self, ctx: _Context, lm_z, key) -> TrunkInputs:
+        if lm_z is not None and self.lm_dropout > 0.0:
+            if key is None:
+                raise ValueError("`key` is required when lm_dropout > 0.")
+            keep_prob = 1.0 - self.lm_dropout
+            mask = jax.random.bernoulli(key, p=keep_prob, shape=lm_z.shape)
+            lm_z = jnp.where(mask, lm_z / keep_prob, 0.0)
+        return TrunkInputs(context=ctx, lm_z=lm_z)
+
+    def init_state(self, inputs: TrunkInputs, *, key=None):
+        """Recurrent pair state before the first pass (zeros; ``key`` is unused)."""
+        del key
+        return jnp.zeros_like(inputs.context.z_init)
+
+    def step(
+        self,
+        inputs: TrunkInputs,
+        z,
+        *,
+        key=None,
+        msa_max_depth: int | None = None,
+    ):
+        """Run exactly one trunk pass: ``z ← trunk(z_init + proj(z) [+ msa(·)])``.
+
+        ``z_init`` includes the (already dropped-out) LM contribution.
+        ``key`` drives MSA row subsampling and is required only when the MSA
+        is deeper than ``msa_max_depth``. The pass is wrapped in a
+        checkpoint so reverse-mode autodiff recomputes its activations
+        instead of storing them.
+        """
+        return eqx.filter_checkpoint(type(self)._trunk_pass)(
+            self, inputs, z, key, msa_max_depth
+        )
+
+    def _trunk_pass(self, inputs: TrunkInputs, z, key, msa_max_depth):
+        ctx = inputs.context
+        z_init = ctx.z_init + inputs.lm_z if inputs.lm_z is not None else ctx.z_init
+        z = z_init + self.pair_loop_proj(z)
+        if self.msa_encoder is not None and ctx.msa_kwargs is not None:
+            msa_kwargs = _subsample_msa_rows(ctx.msa_kwargs, key, msa_max_depth)
+            z = z + self.msa_encoder(x_pair=z, **msa_kwargs)
+        return self.folding_trunk(z, pair_attention_mask=ctx.pair_mask)
+
+    def readout(self, inputs: TrunkInputs, z):
+        """Pair the heads consume. Identity: the recurrent state is the output."""
+        del inputs
+        return z
+
     def _run_trunk(
         self,
         ctx: _Context,
@@ -509,6 +568,11 @@ class ESMFold2Experimental(eqx.Module):
         msa_max_depth: int | None = None,
     ):
         """Refinement loop: ``z_{i+1} = trunk(z_init + proj(z_i) [+ msa(z)])``.
+
+        Equivalent to ``embed`` → ``init_state`` → ``num_loops + 1`` (at
+        least one) calls to ``step`` → ``readout``. ``key`` is split into
+        ``(k_embed, k_init, k_steps)``; pass ``i`` uses
+        ``fold_in(k_steps, i)``.
 
         The LM contribution is added once to ``z_init`` before the loop
         (no per-loop refinement, no per-loop dropout — both are static in
@@ -521,64 +585,23 @@ class ESMFold2Experimental(eqx.Module):
         ``msa_max_depth`` rows from the full MSA (always keeping row 0,
         the query). Same semantics as ``ESMFold2._run_trunk``.
 
-        Same weights every iteration → ``jax.lax.fori_loop``. Body wrapped
-        in ``jax.checkpoint`` so reverse-mode autodiff recomputes per-step
+        Same weights every iteration → ``jax.lax.fori_loop``. Each pass is
+        wrapped in a checkpoint so reverse-mode autodiff recomputes per-step
         activations rather than materialising them (mirrors the release
         model's memory profile).
         """
         total_steps = max(1, num_loops + 1)
+        k_embed, k_init, k_steps = jax.random.split(key, 3)
+        inputs = self._trunk_inputs(ctx, lm_z, k_embed)
+        z = self.init_state(inputs, key=k_init)
 
-        if lm_z is not None and self.lm_dropout > 0.0:
-            key, kdrop = jax.random.split(key)
-            keep_prob = 1.0 - self.lm_dropout
-            mask = jax.random.bernoulli(kdrop, p=keep_prob, shape=lm_z.shape)
-            lm_z = jnp.where(mask, lm_z / keep_prob, 0.0)
+        def body(i, z):
+            return self.step(
+                inputs, z, key=jax.random.fold_in(k_steps, i), msa_max_depth=msa_max_depth
+            )
 
-        z_init = ctx.z_init + lm_z if lm_z is not None else ctx.z_init
-        z0 = jnp.zeros_like(z_init)
-
-        _do_msa_subsample = (
-            self.msa_encoder is not None
-            and ctx.msa_kwargs is not None
-            and msa_max_depth is not None
-            and msa_max_depth < ctx.msa_kwargs["msa_oh"].shape[2]
-        )
-        if _do_msa_subsample:
-            _msa_max_depth_static = int(msa_max_depth)
-            _full_msa_depth = int(ctx.msa_kwargs["msa_oh"].shape[2])
-        else:
-            _msa_max_depth_static = None
-            _full_msa_depth = None
-
-        def body(step_i, carry):
-            z, k = carry
-            z = z_init + self.pair_loop_proj(z)
-            if self.msa_encoder is not None and ctx.msa_kwargs is not None:
-                if _do_msa_subsample:
-                    kmsa = jax.random.fold_in(k, step_i)
-                    pick = jax.random.choice(
-                        kmsa,
-                        _full_msa_depth - 1,
-                        shape=(_msa_max_depth_static - 1,),
-                        replace=False,
-                    ) + 1
-                    idx = jnp.concatenate([jnp.zeros((1,), dtype=pick.dtype), pick])
-                    msa_kwargs_step = {
-                        "x_inputs": ctx.msa_kwargs["x_inputs"],
-                        "msa_oh": jnp.take(ctx.msa_kwargs["msa_oh"], idx, axis=2),
-                        "has_deletion": jnp.take(ctx.msa_kwargs["has_deletion"], idx, axis=2),
-                        "deletion_value": jnp.take(ctx.msa_kwargs["deletion_value"], idx, axis=2),
-                        "msa_attention_mask": jnp.take(ctx.msa_kwargs["msa_attention_mask"], idx, axis=2),
-                    }
-                else:
-                    msa_kwargs_step = ctx.msa_kwargs
-                z = z + self.msa_encoder(x_pair=z, **msa_kwargs_step)
-            z = self.folding_trunk(z, pair_attention_mask=ctx.pair_mask)
-            return (z, k)
-
-        body = jax.checkpoint(body)
-        z, _ = jax.lax.fori_loop(0, total_steps, body, (z0, key))
-        return z
+        z = jax.lax.fori_loop(0, total_steps, body, z)
+        return self.readout(inputs, z)
 
     # ------------------------------------------------------------------
     # Phase 3: diffusion structure sampler
