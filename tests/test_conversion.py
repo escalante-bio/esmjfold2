@@ -1,5 +1,7 @@
 """Native Biohub model loading, conversion, and CPU numerical parity."""
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -154,3 +156,78 @@ def test_folding_components_parity(config):
     )
     actual = eqx.filter_jit(diffusion_module.denoise)(cache, x_noisy, t_hat)
     np.testing.assert_allclose(actual, expected.numpy(), rtol=3e-5, atol=3e-5)
+
+
+def _features_with_msa(sequence, depth, key):
+    features = esmjfold2.Features.from_input_builder(prepare_protein_features(sequence))
+    B, L = features.res_type.shape[:2]
+    k_msa, k_del, k_val = jax.random.split(key, 3)
+    msa = jax.random.randint(k_msa, (B, depth, L), 0, 20)
+    msa = msa.at[:, 0].set(features.res_type.astype(jnp.int32))
+    has_deletion = jax.random.bernoulli(k_del, 0.2, (B, depth, L))
+    deletion_value = jax.random.uniform(k_val, (B, depth, L)) * has_deletion
+    return dataclasses.replace(
+        features,
+        msa=msa,
+        msa_attention_mask=jnp.ones((B, depth, L), dtype=bool),
+        has_deletion=has_deletion,
+        deletion_value=deletion_value,
+        deletion_mean=deletion_value.mean(1),
+    )
+
+
+@pytest.mark.parametrize("model_class", [EsmFold2Model, EsmFold2ExperimentalModel])
+@pytest.mark.parametrize("with_msa", [False, True])
+@pytest.mark.parametrize("num_passes", [1, 3])
+def test_single_pass_trunk_api_matches_run_trunk(config, model_class, with_msa, num_passes):
+    """embed → init_state → step × k → readout reproduces _run_trunk(num_loops=k-1)."""
+    torch.manual_seed(0)
+    model = esmjfold2.from_torch(model_class(config).eval())
+    experimental = model_class is EsmFold2ExperimentalModel
+    if experimental:
+        # Exercise the one-time LM dropout, and perturb the zero-initialised
+        # loop projection so successive passes actually interact.
+        model = dataclasses.replace(model, lm_dropout=0.25)
+        proj = jax.tree.map(
+            lambda x: x + 0.3 * jax.random.normal(jax.random.key(9), x.shape) if eqx.is_array(x) else x,
+            model.pair_loop_proj,
+        )
+        model = eqx.tree_at(lambda m: m.pair_loop_proj, model, proj)
+    else:
+        assert model.per_loop_lm_dropout and model.lm_dropout > 0.0
+
+    if with_msa:
+        features = _features_with_msa("GAGK", 5, jax.random.key(11))
+        msa_max_depth = 3  # shallower than the MSA → per-pass row subsampling
+    else:
+        features = esmjfold2.Features.from_input_builder(prepare_protein_features("GAGK"))
+        msa_max_depth = None
+    lm_hidden = jax.random.normal(jax.random.key(3), (1, 4, config.lm_num_layers + 1, config.lm_d_model))
+    key = jax.random.key(5)
+
+    @eqx.filter_jit
+    def run_trunk(model, features, lm_hidden, key):
+        ctx = model._prepare_embeddings(features)
+        lm_z = model.language_model(lm_hidden)
+        return model._run_trunk(ctx, lm_z, key, num_loops=num_passes - 1, msa_max_depth=msa_max_depth)
+
+    embed = eqx.filter_jit(lambda m, f, h, k: m.embed(f, m.language_model(h), key=k))
+    init_state = eqx.filter_jit(lambda m, inputs, k: m.init_state(inputs, key=k))
+    step = eqx.filter_jit(lambda m, inputs, z, k: m.step(inputs, z, key=k, msa_max_depth=msa_max_depth))
+    readout = eqx.filter_jit(lambda m, inputs, z: m.readout(inputs, z))
+
+    if experimental:
+        k_embed, k_init, k_steps = jax.random.split(key, 3)
+    else:
+        # ESMFold2.embed draws no randomness; any key works.
+        (k_steps, k_init), k_embed = jax.random.split(key), jax.random.key(1)
+    inputs = embed(model, features, lm_hidden, k_embed)
+    assert isinstance(inputs, esmjfold2.TrunkInputs)
+    z = init_state(model, inputs, k_init)
+    for i in range(num_passes):
+        z = step(model, inputs, z, jax.random.fold_in(k_steps, i))
+    actual = readout(model, inputs, z)
+
+    expected = run_trunk(model, features, lm_hidden, key)
+    assert np.isfinite(np.asarray(expected)).all()
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
