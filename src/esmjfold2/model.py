@@ -37,7 +37,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from .atom_encoder import CHAR_VOCAB_SIZE, MAX_ATOMIC_NUMBER
 from .backend import AbstractFromTorch, from_torch
@@ -124,8 +124,6 @@ def _subsample_msa_rows(msa_kwargs: dict, key, max_depth: int | None) -> dict:
     full_depth = int(msa_kwargs["msa_oh"].shape[2])
     if max_depth is None or max_depth >= full_depth:
         return msa_kwargs
-    if key is None:
-        raise ValueError("`key` is required to subsample MSA rows.")
     pick = jax.random.choice(
         key, full_depth - 1, shape=(int(max_depth) - 1,), replace=False
     ) + 1
@@ -330,19 +328,21 @@ class ESMFold2(eqx.Module):
     # Phase 2: trunk refinement loop + parcae readout/coda
     # ------------------------------------------------------------------
 
-    def embed(self, features: Features, lm_z=None, *, key=None) -> TrunkInputs:
+    def embed(
+        self, features: Features, lm_z=None, *, key: PRNGKeyArray
+    ) -> TrunkInputs:
         """Build the trunk inputs that stay fixed across passes.
 
         ``lm_z`` is the LM pair contribution,
         ``self.language_model(lm_hidden_states)``, or ``None`` to skip LM
         conditioning. ``key`` is unused here (this model draws its LM
-        dropout per pass in ``step``); it is accepted so both model
-        classes share one signature.
+        dropout per pass in ``step``); it is taken so both model classes
+        share one signature.
         """
         del key
         return TrunkInputs(context=self._prepare_embeddings(features), lm_z=lm_z)
 
-    def init_state(self, inputs: TrunkInputs, *, key):
+    def init_state(self, inputs: TrunkInputs, *, key: PRNGKeyArray):
         """Recurrent pair state before the first pass (truncated normal)."""
         shape = inputs.context.z_init.shape
         std = math.sqrt(2.0 / (5.0 * shape[-1]))
@@ -355,7 +355,7 @@ class ESMFold2(eqx.Module):
         inputs: TrunkInputs,
         z,
         *,
-        key,
+        key: PRNGKeyArray,
         msa_max_depth: int | None = 1024,
     ):
         """Run exactly one trunk pass and return the next recurrent state.

@@ -27,7 +27,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from .atom_encoder import (
     CHAR_VOCAB_SIZE,
@@ -499,27 +499,26 @@ class ESMFold2Experimental(eqx.Module):
     # Phase 2: trunk refinement loop
     # ------------------------------------------------------------------
 
-    def embed(self, features: Features, lm_z=None, *, key=None) -> TrunkInputs:
+    def embed(
+        self, features: Features, lm_z=None, *, key: PRNGKeyArray
+    ) -> TrunkInputs:
         """Build the trunk inputs that stay fixed across passes.
 
         ``lm_z`` is the LM pair contribution,
         ``self.language_model(lm_hidden_states)``, or ``None`` to skip LM
         conditioning. This architecture applies its LM dropout once, here,
-        using ``key`` (required only when ``lm_dropout > 0`` and ``lm_z`` is
-        given).
+        using ``key``.
         """
         return self._trunk_inputs(self._prepare_embeddings(features), lm_z, key)
 
-    def _trunk_inputs(self, ctx: _Context, lm_z, key) -> TrunkInputs:
+    def _trunk_inputs(self, ctx: _Context, lm_z, key: PRNGKeyArray) -> TrunkInputs:
         if lm_z is not None and self.lm_dropout > 0.0:
-            if key is None:
-                raise ValueError("`key` is required when lm_dropout > 0.")
             keep_prob = 1.0 - self.lm_dropout
             mask = jax.random.bernoulli(key, p=keep_prob, shape=lm_z.shape)
             lm_z = jnp.where(mask, lm_z / keep_prob, 0.0)
         return TrunkInputs(context=ctx, lm_z=lm_z)
 
-    def init_state(self, inputs: TrunkInputs, *, key=None):
+    def init_state(self, inputs: TrunkInputs, *, key: PRNGKeyArray):
         """Recurrent pair state before the first pass (zeros; ``key`` is unused)."""
         del key
         return jnp.zeros_like(inputs.context.z_init)
@@ -529,14 +528,14 @@ class ESMFold2Experimental(eqx.Module):
         inputs: TrunkInputs,
         z,
         *,
-        key=None,
+        key: PRNGKeyArray,
         msa_max_depth: int | None = None,
     ):
         """Run exactly one trunk pass: ``z ← trunk(z_init + proj(z) [+ msa(·)])``.
 
         ``z_init`` includes the (already dropped-out) LM contribution.
-        ``key`` drives MSA row subsampling and is required only when the MSA
-        is deeper than ``msa_max_depth``. The pass is wrapped in a
+        ``key`` drives MSA row subsampling (used only when the MSA is deeper
+        than ``msa_max_depth``). The pass is wrapped in a
         checkpoint so reverse-mode autodiff recomputes its activations
         instead of storing them.
         """

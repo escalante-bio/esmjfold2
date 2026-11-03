@@ -219,7 +219,8 @@ def test_single_pass_trunk_api_matches_run_trunk(config, model_class, with_msa, 
     if experimental:
         k_embed, k_init, k_steps = jax.random.split(key, 3)
     else:
-        (k_steps, k_init), k_embed = jax.random.split(key), None
+        # ESMFold2.embed draws no randomness; any key works.
+        (k_steps, k_init), k_embed = jax.random.split(key), jax.random.key(1)
     inputs = embed(model, features, lm_hidden, k_embed)
     assert isinstance(inputs, esmjfold2.TrunkInputs)
     z = init_state(model, inputs, k_init)
